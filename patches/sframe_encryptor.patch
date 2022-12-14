@@ -1,0 +1,393 @@
+diff --git a/api/BUILD.gn b/api/BUILD.gn
+index 6c9414e54d..d7d2a42c31 100644
+--- a/api/BUILD.gn
++++ b/api/BUILD.gn
+@@ -217,6 +217,7 @@ rtc_library("libjingle_peerconnection_api") {
+     "sctp_transport_interface.h",
+     "set_local_description_observer_interface.h",
+     "set_remote_description_observer_interface.h",
++    "sframe_crypto_interface.h",
+     "stats_types.cc",
+     "stats_types.h",
+     "uma_metrics.h",
+diff --git a/api/crypto/BUILD.gn b/api/crypto/BUILD.gn
+index 70626f695f..18f395f90c 100644
+--- a/api/crypto/BUILD.gn
++++ b/api/crypto/BUILD.gn
+@@ -13,6 +13,7 @@ group("crypto") {
+     ":frame_decryptor_interface",
+     ":frame_encryptor_interface",
+     ":options",
++    ":my_frame_encryptor",
+   ]
+ }
+ 
+@@ -47,3 +48,18 @@ rtc_source_set("frame_encryptor_interface") {
+     "../../rtc_base:refcount",
+   ]
+ }
++
++rtc_source_set("my_frame_encryptor") {
++  visibility = [ "*" ]
++  sources = [
++    "my_frame_encryptor.cc",
++    "my_frame_encryptor.h",
++  ]
++  deps = [
++    ":frame_encryptor_interface",
++    "..:array_view",
++    "..:rtp_parameters",
++    "../../rtc_base:refcount",
++    "../../rtc_base:checks",
++  ]
++}
+diff --git a/api/crypto/my_frame_encryptor.cc b/api/crypto/my_frame_encryptor.cc
+new file mode 100644
+index 0000000000..71f2972595
+--- /dev/null
++++ b/api/crypto/my_frame_encryptor.cc
+@@ -0,0 +1,65 @@
++/*
++ *  Copyright 2018 The WebRTC project authors. All Rights Reserved.
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#include "api/crypto/my_frame_encryptor.h"
++
++#include "rtc_base/checks.h"
++
++namespace webrtc {
++MyFrameEncryptor::MyFrameEncryptor(uint8_t fake_key, uint8_t postfix_byte)
++    : fake_key_(fake_key), postfix_byte_(postfix_byte) {}
++
++// FrameEncryptorInterface implementation
++int MyFrameEncryptor::Encrypt(cricket::MediaType media_type,
++                              uint32_t ssrc,
++                              rtc::ArrayView<const uint8_t> additional_data,
++                              rtc::ArrayView<const uint8_t> frame,
++                              rtc::ArrayView<uint8_t> encrypted_frame,
++                              size_t* bytes_written) {
++  if (fail_encryption_) {
++    return static_cast<int>(FakeEncryptionStatus::FORCED_FAILURE);
++  }
++
++  RTC_CHECK_EQ(frame.size() + 1, encrypted_frame.size());
++  for (size_t i = 0; i < frame.size(); i++) {
++    encrypted_frame[i] = frame[i] ^ fake_key_;
++  }
++
++  encrypted_frame[frame.size()] = postfix_byte_;
++  *bytes_written = encrypted_frame.size();
++  return static_cast<int>(FakeEncryptionStatus::OK);
++}
++
++size_t MyFrameEncryptor::GetMaxCiphertextByteSize(cricket::MediaType media_type,
++                                                  size_t frame_size) {
++  return frame_size + 1;
++}
++
++void MyFrameEncryptor::SetFakeKey(uint8_t fake_key) {
++  fake_key_ = fake_key;
++}
++
++uint8_t MyFrameEncryptor::GetFakeKey() const {
++  return fake_key_;
++}
++
++void MyFrameEncryptor::SetPostfixByte(uint8_t postfix_byte) {
++  postfix_byte_ = postfix_byte;
++}
++
++uint8_t MyFrameEncryptor::GetPostfixByte() const {
++  return postfix_byte_;
++}
++
++void MyFrameEncryptor::SetFailEncryption(bool fail_encryption) {
++  fail_encryption_ = fail_encryption;
++}
++
++}  // namespace webrtc
+diff --git a/api/crypto/my_frame_encryptor.h b/api/crypto/my_frame_encryptor.h
+new file mode 100644
+index 0000000000..d77122c6f4
+--- /dev/null
++++ b/api/crypto/my_frame_encryptor.h
+@@ -0,0 +1,68 @@
++/*
++ *  Copyright 2018 The WebRTC project authors. All Rights Reserved.
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ */
++
++#ifndef API_TEST_FAKE_FRAME_ENCRYPTOR_H_
++#define API_TEST_FAKE_FRAME_ENCRYPTOR_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "api/array_view.h"
++#include "api/crypto/frame_encryptor_interface.h"
++#include "api/media_types.h"
++#include "rtc_base/ref_counted_object.h"
++
++namespace webrtc {
++
++// The FakeFrameEncryptor is a TEST ONLY fake implementation of the
++// FrameEncryptorInterface. It is constructed with a simple single digit key and
++// a fixed postfix byte. This is just to validate that the core code works
++// as expected.
++class MyFrameEncryptor : public rtc::RefCountedObject<FrameEncryptorInterface> {
++ public:
++  // Provide a key (0,255) and some postfix byte (0,255).
++  explicit MyFrameEncryptor(uint8_t fake_key = 0xAA,
++                            uint8_t postfix_byte = 255);
++  // Simply xors each payload with the provided fake key and adds the postfix
++  // bit to the end. This will always fail if fail_encryption_ is set to true.
++  int Encrypt(cricket::MediaType media_type,
++              uint32_t ssrc,
++              rtc::ArrayView<const uint8_t> additional_data,
++              rtc::ArrayView<const uint8_t> frame,
++              rtc::ArrayView<uint8_t> encrypted_frame,
++              size_t* bytes_written) override;
++  // Always returns 1 more than the size of the frame.
++  size_t GetMaxCiphertextByteSize(cricket::MediaType media_type,
++                                  size_t frame_size) override;
++  // Sets the fake key to use during encryption.
++  void SetFakeKey(uint8_t fake_key);
++  // Returns the fake key used during encryption.
++  uint8_t GetFakeKey() const;
++  // Set the postfix byte to use.
++  void SetPostfixByte(uint8_t expected_postfix_byte);
++  // Return a postfix byte added to each outgoing payload.
++  uint8_t GetPostfixByte() const;
++  // Force all encryptions to fail.
++  void SetFailEncryption(bool fail_encryption);
++
++  enum class FakeEncryptionStatus : int {
++    OK = 0,
++    FORCED_FAILURE = 1,
++  };
++
++ private:
++  uint8_t fake_key_ = 0;
++  uint8_t postfix_byte_ = 0;
++  bool fail_encryption_ = false;
++};
++
++}  // namespace webrtc
++
++#endif  // API_TEST_FAKE_FRAME_ENCRYPTOR_H_
+diff --git a/api/sframe_crypto_interface.h b/api/sframe_crypto_interface.h
+new file mode 100644
+index 0000000000..f01281959c
+--- /dev/null
++++ b/api/sframe_crypto_interface.h
+@@ -0,0 +1,32 @@
++#ifndef API_SFRAME_CRYPTO_INTERFACE_H_
++#define API_SFRAME_CRYPTO_INTERFACE_H_
++
++#include <stdint.h>
++
++#include "api/crypto/frame_encryptor_interface.h"
++#include "rtc_base/ref_count.h"
++#include "rtc_base/system/rtc_export.h"
++
++namespace webrtc {
++
++class RTC_EXPORT SFrameCryptoInterface : public rtc::RefCountInterface {
++ public:
++  class EncryptorOptions {
++   public:
++    EncryptorOptions(absl::string_view encryptor_key)
++        : encryptor_key_(encryptor_key) {}
++
++    const std::string& encryptor_key() const { return encryptor_key_; }
++
++   private:
++    std::string encryptor_key_;
++  };
++
++ protected:
++  SFrameCryptoInterface() {}
++  ~SFrameCryptoInterface() override = default;
++};
++
++}  // namespace webrtc
++
++#endif  // API_SFRAME_CRYPTO_INTERFACE_H_
+diff --git a/sdk/android/BUILD.gn b/sdk/android/BUILD.gn
+index b3f641a2f7..8acf93931e 100644
+--- a/sdk/android/BUILD.gn
++++ b/sdk/android/BUILD.gn
+@@ -263,6 +263,7 @@ if (is_android) {
+       "api/org/webrtc/FecControllerFactoryFactoryInterface.java",
+       "api/org/webrtc/FrameDecryptor.java",
+       "api/org/webrtc/FrameEncryptor.java",
++      "api/org/webrtc/FrameEncryptorFactory.java",
+       "api/org/webrtc/IceCandidate.java",
+       "api/org/webrtc/IceCandidateErrorEvent.java",
+       "api/org/webrtc/MediaConstraints.java",
+@@ -755,6 +756,8 @@ if (current_os == "linux" || is_android) {
+       "src/jni/pc/stats_observer.h",
+       "src/jni/pc/turn_customizer.cc",
+       "src/jni/pc/turn_customizer.h",
++      "src/jni/pc/frame_encryptor_factory.cc",
++      "src/jni/pc/frame_encryptor_factory.h"
+     ]
+ 
+     deps = [
+@@ -772,6 +775,7 @@ if (current_os == "linux" || is_android) {
+       "../../api:rtp_parameters",
+       "../../api:turn_customizer",
+       "../../api/crypto:options",
++      "../../api/crypto:my_frame_encryptor",
+       "../../api/rtc_event_log:rtc_event_log_factory",
+       "../../api/task_queue:default_task_queue_factory",
+       "../../api/video_codecs:video_codecs_api",
+@@ -1385,6 +1389,7 @@ if (current_os == "linux" || is_android) {
+       "api/org/webrtc/StatsObserver.java",
+       "api/org/webrtc/StatsReport.java",
+       "api/org/webrtc/TurnCustomizer.java",
++      "api/org/webrtc/FrameEncryptorFactory.java",
+     ]
+     namespace = "webrtc::jni"
+     jni_generator_include = "//sdk/android/src/jni/jni_generator_helper.h"
+diff --git a/sdk/android/api/org/webrtc/FrameEncryptorFactory.java b/sdk/android/api/org/webrtc/FrameEncryptorFactory.java
+new file mode 100644
+index 0000000000..89947d383c
+--- /dev/null
++++ b/sdk/android/api/org/webrtc/FrameEncryptorFactory.java
+@@ -0,0 +1,48 @@
++package org.webrtc;
++
++public final class FrameEncryptorFactory {
++
++    private final SFrameEncryptorOptions encryptorOptions;
++
++    public FrameEncryptorFactory(String encryptorKey) {
++        encryptorOptions = new SFrameEncryptorOptions(encryptorKey);
++    }
++
++    public final class SFrameEncryptorOptions {
++
++        public SFrameEncryptorOptions(String encryptorKey) {
++            this.encryptorKey = encryptorKey;
++        }
++
++        private String encryptorKey;
++
++        public void setEncryptorKey(String encryptorKey) {
++            this.encryptorKey = encryptorKey;
++        }
++
++        @CalledByNative("SFrameEncryptorOptions")
++        public String getEncryptorKey() {
++            return encryptorKey;
++        }
++    }
++
++
++    public FrameEncryptor createMyFrameEncryptor() {
++        return new MyFrameEncryptor(nativeFrameEncryptor(encryptorOptions));
++    }
++
++    class MyFrameEncryptor implements FrameEncryptor {
++        private final long nativeEncryptor;
++
++        MyFrameEncryptor(long nativeEncryptor) {
++            this.nativeEncryptor = nativeEncryptor;
++        }
++
++        @Override
++        public long getNativeFrameEncryptor() {
++            return nativeEncryptor;
++        }
++    }
++
++    private static native long nativeFrameEncryptor(SFrameEncryptorOptions options);
++}
+diff --git a/sdk/android/src/jni/pc/frame_encryptor_factory.cc b/sdk/android/src/jni/pc/frame_encryptor_factory.cc
+new file mode 100644
+index 0000000000..da8c4bba31
+--- /dev/null
++++ b/sdk/android/src/jni/pc/frame_encryptor_factory.cc
+@@ -0,0 +1,33 @@
++#include "sdk/android/src/jni/pc/frame_encryptor_factory.h"
++
++#include <cstdint>
++
++#include "api/crypto/my_frame_encryptor.h"
++#include "api/sframe_crypto_interface.h"
++#include "rtc_base/string_to_number.h"
++#include "sdk/android/generated_peerconnection_jni/FrameEncryptorFactory_jni.h"
++
++namespace webrtc {
++namespace jni {
++
++SFrameCryptoInterface::EncryptorOptions JavaToNativeSFrameEncryptorOptions(
++    JNIEnv* jni,
++    const JavaRef<jobject>& j_encryptor_options) {
++  ScopedJavaLocalRef<jstring> encryptor_key =
++      Java_SFrameEncryptorOptions_getEncryptorKey(jni, j_encryptor_options);
++  return SFrameCryptoInterface::EncryptorOptions(
++      JavaToNativeString(jni, encryptor_key));
++}
++
++static jlong JNI_FrameEncryptorFactory_FrameEncryptor(
++    JNIEnv* env,
++    const base::android::JavaParamRef<jobject>& j_options) {
++  SFrameCryptoInterface::EncryptorOptions options =
++      JavaToNativeSFrameEncryptorOptions(env, j_options);
++  absl::optional<uint8_t> optional_key =
++      rtc::StringToNumber<uint8_t>(options.encryptor_key());
++  return jlongFromPointer(new MyFrameEncryptor(optional_key.value_or(0xAA)));
++}
++
++}  // namespace jni
++}  // namespace webrtc
+diff --git a/sdk/android/src/jni/pc/frame_encryptor_factory.h b/sdk/android/src/jni/pc/frame_encryptor_factory.h
+new file mode 100644
+index 0000000000..c4bd675002
+--- /dev/null
++++ b/sdk/android/src/jni/pc/frame_encryptor_factory.h
+@@ -0,0 +1,31 @@
++/*
++ *  Copyright 2017 The WebRTC project authors. All Rights Reserved.
++ *
++ *  Use of this source code is governed by a BSD-style license
++ *  that can be found in the LICENSE file in the root of the source
++ *  tree. An additional intellectual property rights grant can be found
++ *  in the file PATENTS.  All contributing project authors may
++ *  be found in the AUTHORS file in the root of the source tree.
++ *
++ *  from /sdk/android/src/jni/pc/peer_connection_factory.h
++ */
++
++#ifndef SDK_ANDROID_SRC_JNI_PC_FRAME_ENCRYPTOR_FACTORY_H_
++#define SDK_ANDROID_SRC_JNI_PC_FRAME_ENCRYPTOR_FACTORY_H_
++
++#include <jni.h>
++
++#include "api/sframe_crypto_interface.h"
++#include "sdk/android/src/jni/jni_helpers.h"
++
++namespace webrtc {
++namespace jni {
++
++SFrameCryptoInterface::EncryptorOptions JavaToNativeSFrameEncryptorOptions(
++    JNIEnv* jni,
++    const JavaRef<jobject>& j_encryptor_options);
++
++}  // namespace jni
++}  // namespace webrtc
++
++#endif  // SDK_ANDROID_SRC_JNI_PC_FRAME_ENCRYPTOR_FACTORY_H_
