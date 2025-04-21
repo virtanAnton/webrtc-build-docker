@@ -32,6 +32,7 @@ function build_target {
 
     docker run -it -v ${PWD}/webrtc:/webrtc threema/webrtc-build-tools:latest bash -c "
         set -euo pipefail
+        gclient sync
         cd src
         gn gen out/android-${target} --args='cc_wrapper=\"ccache\" target_os=\"android\" target_cpu=\"${target}\" ${build_args}'
         source build/android/envsetup.sh
